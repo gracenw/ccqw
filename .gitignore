@@ -1,0 +1,16 @@
+**/custom_data
+out
+**/archive
+**/weights
+rampc_v
+**/__pycache__
+**/layers
+**/*.npy
+data
+causal_mask
+quant
+peace
+models/kernels
+Models/weights
+debug_t5
+custom_datasets
