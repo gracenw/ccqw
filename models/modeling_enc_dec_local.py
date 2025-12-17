@@ -34,7 +34,7 @@ from transformers import AutoConfig
 from transformers import AutoModel, AutoModelForCausalLM
 from transformers import EncoderDecoderConfig
 
-from modeling_bert_local import BertModel, BertLMHeadModel
+from .modeling_bert_local import BertModel, BertLMHeadModel
 
 logger = logging.get_logger(__name__)
 

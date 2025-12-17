@@ -8,10 +8,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import argparse
 
-from os import makedirs
+from os import makedirs, getcwd
 from os.path import exists
 from transformers import AutoTokenizer
-from ..models.modeling_opt_local import OPTForCausalLM
+
+# import sys
+# sys.path.insert(1, f'~/dev/repos/ccqw/models')
+
+from models import OPTForCausalLM
 
 
 class Identity(nn.Module):
@@ -135,8 +139,9 @@ def compare_tensors(ten1, ten2, diff):
 
 
 def scratch_sdpa_masked_batched(query, key, value, mask):
-    batch_size, seq_length, hidden_dim = query.shape
-    num_attention_heads = 12
+    batch_size, seq_length = query.shape[:2]
+    num_attention_heads = 16
+    hidden_dim = 1024
     attention_head_size = hidden_dim // num_attention_heads
 
     new_q_shape = query.size()[:-1] + (num_attention_heads, attention_head_size)
@@ -148,12 +153,15 @@ def scratch_sdpa_masked_batched(query, key, value, mask):
 
     attention_scores = torch.matmul(query, key.transpose(-1, -2))
     attention_scores /= math.sqrt(attention_head_size)
-    target_len = attention_scores.shape[3]
+    target_length = attention_scores.shape[3]
 
-    extend_mask = mask[:, None, None, :].expand(batch_size, 1, seq_length, target_len).repeat(1, num_attention_heads, 1, 1)
-    boolean_mask = (extend_mask == 0)
-    extend_mask = extend_mask.masked_fill_(boolean_mask, -1e9)
-    attention_scores += extend_mask
+    ## add the causal mask
+    if seq_length > 1:
+        target_length = attention_scores.shape[3]
+        attention_bias = torch.zeros(seq_length, target_length, dtype=query.dtype)
+        mask = torch.ones(seq_length, target_length, dtype=torch.bool).tril(diagonal=0)
+        attention_bias.masked_fill_(mask.logical_not(), float("-inf"))
+        attention_scores += attention_bias
 
     attention_probs = nn.functional.softmax(attention_scores, dim=-1)
     attention_output = torch.matmul(attention_probs, value)
@@ -161,7 +169,7 @@ def scratch_sdpa_masked_batched(query, key, value, mask):
     return (attention_output, attention_scores)
 
 
-def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
+def dump_opt_parallel(model, inputs, save, verbose, dropout, home, num_accel):
     model = model.to("cpu")
     inputs = inputs.to("cpu")
 
@@ -188,7 +196,7 @@ def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
 
     ## iterate over decoder
     for l in range(24):
-        block = model.decoder.layers[l]
+        block = model.model.decoder.layers[l]
 
         '''
         OPTForCausalLM(
@@ -206,11 +214,11 @@ def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
                                 (q_proj): Linear(in_features=1024, out_features=1024, bias=True)
                                 (out_proj): Linear(in_features=1024, out_features=1024, bias=True)
                                 (sdpa): ScratchSDPAMasked()
-                            )
-                            (activation_fn): ReLU()
+                            ) + residual
                             (self_attn_layer_norm): LayerNorm((1024,), eps=1e-05, elementwise_affine=True)
                             (fc1): Linear(in_features=1024, out_features=4096, bias=True)
-                            (fc2): Linear(in_features=4096, out_features=1024, bias=True)
+                            (activation_fn): ReLU()
+                            (fc2): Linear(in_features=4096, out_features=1024, bias=True) + residual
                             (final_layer_norm): LayerNorm((1024,), eps=1e-05, elementwise_affine=True)
                         )
                     )
@@ -222,15 +230,17 @@ def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
         prefix = f"model.decoder.layers.{l}"
 
         ## input to self-attention block of decoder
-        attn_in = activations[prefix + '.self_attn']["input"][0]
+        attn_in = activations[prefix]["input"][0]
+        # print(attn_in)
+        # exit()
         
         ## query weights, bias, model outputs, local outputs
         query_w = block.self_attn.q_proj.weight
         query_b = block.self_attn.q_proj.bias
         query_o = activations[f"{prefix}.self_attn.q_proj"]["output"][0]
-        # if len(query_o.shape) < 3:
-        #     ## batch it
-        #     query_o = query_o.unsqueeze(0)
+        if len(query_o.shape) < 3:
+            ## batch it
+            query_o = query_o.unsqueeze(0)
         sw_query_o = torch.einsum("ijk,lk->ijl", attn_in, query_w) + query_b
         split_query_w = split(query_w, num_accel)
 
@@ -238,9 +248,9 @@ def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
         key_w = block.self_attn.k_proj.weight
         key_b = block.self_attn.k_proj.bias
         key_o = activations[f"{prefix}.self_attn.k_proj"]["output"][0]
-        # if len(key_o.shape) < 3:
-        #     ## batch it
-        #     key_o = key_o.unsqueeze(0)
+        if len(key_o.shape) < 3:
+            ## batch it
+            key_o = key_o.unsqueeze(0)
         sw_key_o = torch.einsum("ijk,lk->ijl", attn_in, key_w) + key_b
         split_key_w = split(key_w, num_accel)
 
@@ -248,9 +258,9 @@ def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
         value_w = block.self_attn.v_proj.weight
         value_b = block.self_attn.v_proj.bias
         value_o = activations[f"{prefix}.self_attn.v_proj"]["output"][0]
-        # if len(value_o.shape) < 3:
-        #     ## batch it
-        #     value_o = value_o.unsqueeze(0)
+        if len(value_o.shape) < 3:
+            ## batch it
+            value_o = value_o.unsqueeze(0)
         sw_value_o = torch.einsum("ijk,lk->ijl", attn_in, value_w) + value_b
         split_value_w = split(value_w, num_accel)
         
@@ -276,12 +286,12 @@ def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
         # if len(layernorm1_o.shape) < 3:
         #     ## batch it
         #     layernorm1_o = layernorm1_o.unsqueeze(0)
-        layernorm1_w = block.attention.output.LayerNorm.weight
-        layernorm1_b = block.attention.output.LayerNorm.bias
+        layernorm1_w = block.self_attn_layer_norm.weight
+        layernorm1_b = block.self_attn_layer_norm.bias
 
-        ## intermediate network
-        ffn1_w = block.intermediate.dense.weight
-        ffn1_b = block.intermediate.dense.bias
+        ## first linear layer
+        ffn1_w = block.fc1.weight
+        ffn1_b = block.fc1.bias
         relu_in = activations[f"{prefix}.activation_fn"]["input"][0]
         sw_relu_in = torch.einsum("jk,lk->jl", layernorm1_o, ffn1_w) + ffn1_b
         ffn1_o_relu = activations[f"{prefix}.activation_fn"]["output"][0]
@@ -291,10 +301,10 @@ def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
         sw_ffn1_o_relu = torch.nn.functional.relu(torch.einsum("jk,lk->jl", layernorm1_o, ffn1_w) + ffn1_b)
         split_ffn1_w = split(ffn1_w, num_accel)
 
-        ## second output network
-        ffn2_w = block.output.dense.weight
-        ffn2_b = block.output.dense.bias
-        ffn2_o = activations[f"encoder.encoder.layer.{l}.output.dense"]["output"][0]
+        ## second linear layer
+        ffn2_w = block.fc2.weight
+        ffn2_b = block.fc2.bias
+        ffn2_o = activations[f"{prefix}.fc2"]["output"][0]
         # if len(ffn2_o.shape) < 3:
         #     ## batch it
         #     ffn2_o = ffn2_o.unsqueeze(0)
@@ -304,12 +314,12 @@ def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
         ## second residual and layernorm
         rsd2_o = ffn2_o + layernorm1_o    
         sw_rsd2_o = sw_ffn2_o + layernorm1_o     
-        layernorm2_o = activations[f"encoder.encoder.layer.{l}.output.LayerNorm"]["output"][0]
+        layernorm2_o = activations[f"{prefix}.final_layer_norm"]["output"][0]
         # if len(layernorm2_o.shape) < 3:
         #     ## batch it
         #     layernorm2_o = layernorm2_o.unsqueeze(0)
-        layernorm2_w = block.output.LayerNorm.weight
-        layernorm2_b = block.output.LayerNorm.bias
+        layernorm2_w = block.final_layer_norm.weight
+        layernorm2_b = block.final_layer_norm.bias
 
         ## verify output parallelism
         split_query_o = split_mat_mul_batched(attn_in, query_w, query_b, num_accel)
@@ -414,6 +424,8 @@ def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
 if __name__ == "__main__":
     model = OPTForCausalLM.from_pretrained("facebook/opt-350m")
     tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
+    # print(model.config)
+    # exit()
     inputs = tokenizer([("What are we having for dinner?")], return_tensors="pt")
 
     parser = argparse.ArgumentParser()
@@ -423,7 +435,7 @@ if __name__ == "__main__":
     parser.add_argument('-a', '--accel', type=int, help='number of accelerators to employ output parallelism', default=1)
     parser.add_argument('-l', '--location', type=str, help='location of home directory for saving', required=True)
     args = parser.parse_args()
-    dump_bert_parallel(
+    dump_opt_parallel(
         model=model, 
         inputs=inputs, 
         save=args.save, 
