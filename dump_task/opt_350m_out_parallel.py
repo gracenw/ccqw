@@ -11,7 +11,7 @@ import argparse
 from os import makedirs
 from os.path import exists
 from transformers import AutoTokenizer
-from models.modeling_opt_local import OPTForCausalLM
+from ..models.modeling_opt_local import OPTForCausalLM
 
 
 class Identity(nn.Module):
@@ -169,61 +169,6 @@ def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
         if not exists(home):
             makedirs(home)
 
-    # def disable_dropout_prompt():
-    #     response = input('do you want to disable dropout layers? (y/n) ')
-    #     if response == 'y':
-    #         disable_dropout(model)
-    #         print('disabling dropout layers')
-    #     elif response == 'n':
-    #         print('leaving dropout layers enabled')
-    #     else:
-    #         print('please respond with y or n - other inputs will not be parsed correctly')
-    #         disable_dropout_prompt()
-    # disable_dropout_prompt()
-
-    # def num_accel_prompt():
-    #     num_accel = 1
-    #     response = input('how many accelerators do you want to employ output parallelism for? (1-10) ') ## check this number with jenna
-    #     if int(response) in range(1, 11):
-    #         num_accel = int(response)
-    #         print(f'setting number of accelerators to {num_accel}')
-    #         return num_accel
-    #     else:
-    #         print('please respond with a number 1 through 10 - other inputs will not be parsed correctly')
-    #         num_accel_prompt()
-    # num_accel = num_accel_prompt()
-    
-    # def verbose_prompt():
-    #     verbose = False
-    #     response = input('do you want verbose output? (y/n) ')
-    #     if response == 'y':
-    #         verbose = True
-    #         print('enabling verbose output - layer sizes will be printed')
-    #         return verbose
-    #     elif response == 'n':
-    #         print('continuing without verbose output - layer sizes will not be printed')
-    #         return verbose
-    #     else:
-    #         print('please respond with y or n - other inputs will not be parsed correctly')
-    #         verbose_prompt()
-    # verbose = verbose_prompt()
-
-    # def save_prompt():
-    #     save = False
-    #     response = input('do you want to save all mat-mul weights? (y/n) ')
-    #     if response == 'y':
-    #         save = True
-    #         print(f'weights/activations will be saved to "{home}/model/bert_base/npy"')
-    #         print('home location can be modified within the script')
-    #         return save
-    #     elif response == 'n':
-    #         print('weights/activations will not be saved')
-    #         return save
-    #     else:
-    #         print('please respond with y or n - other inputs will not be parsed correctly')
-    #         save_prompt()
-    # save = save_prompt()
-
     if not dropout:
         disable_dropout(model)
 
@@ -239,7 +184,6 @@ def dump_bert_parallel(model, inputs, save, verbose, dropout, home, num_accel):
     activations = register_hooks(model)
 
     with torch.no_grad():
-        # model(**inputs)
         model.generate(inputs.input_ids, attention_mask=inputs.attention_mask)
 
     ## iterate over decoder
